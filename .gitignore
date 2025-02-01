@@ -1,0 +1,49 @@
+# ===================
+# Python & Poetry
+# ===================
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+site/
+pip-wheel-metadata/
+poetry.lock
+
+# Poetry virtual environment
+.env
+.venv/
+env/
+venv/
+
+# ===================
+# JetBrains (PyCharm)
+# ===================
+.idea/
+*.iml
+out/
+
+# ===================
+# VSCode
+# ===================
+.vscode/
+.history/
+.settings/
+
+# ===================
+# Logs & Temp Files
+# ===================
+logs/
+*.log
+*.swp
+*.swo
+*.swn
+.DS_Store
+Thumbs.db
+
+# ===================
+# MongoDB Replica Set
+# ===================
+mongo_repset/

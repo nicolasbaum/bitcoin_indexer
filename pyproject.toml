@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "bitcoin-indexer"
+version = "0.1.0"
+description = "Bitcoin Blockchain Indexer"
+authors = ["Nicolas Baum <nicolasbaum@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pymongo = "^4.11"
+aiohttp = "^3.11.11"
+asyncio = "^3.4.3"
+loguru = "^0.7.3"
+tqdm = "^4.67.1"
+numpy = "^2.2.2"
+pandas = "^2.2.3"
+matplotlib = "^3.10.0"
+
+
+[tool.poetry.group.dev.dependencies]
+isort = "^6.0.0"
+flake8 = "^7.1.1"
+pre-commit = "^4.1.0"
+black = "^25.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
