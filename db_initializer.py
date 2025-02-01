@@ -1,8 +1,13 @@
+import os
+
 from loguru import logger
 from pymongo import ASCENDING, MongoClient
 
+# Load MongoDB URI from environment variable
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+
 # MongoDB Connection
-client = MongoClient("mongodb://localhost:27017/")
+client = MongoClient(MONGO_URI)
 db = client["bitcoin_db"]
 
 
@@ -10,6 +15,7 @@ def setup_collections():
     """
     Ensures all collections exist and are properly indexed.
     """
+    logger.info(f"🔄 Connecting to MongoDB at {MONGO_URI}")
     logger.info("🔄 Initializing MongoDB collections and indexes...")
 
     # 🟢 Blocks Collection
@@ -28,6 +34,9 @@ def setup_collections():
     db.transactions.create_index(
         [("vout.scriptPubKey.addresses", ASCENDING)]
     )  # Index addresses
+    # For block
+    db.transactions.create_index([("block_hash", ASCENDING)])
+    db.transactions.create_index([("block_height", ASCENDING)])
 
     # 🟢 Mempool Collection
     if "mempool" not in db.list_collection_names():
@@ -46,7 +55,7 @@ def setup_collections():
         db.create_collection("system")
         logger.info("✅ Created 'system' collection.")
 
-        # Initialize default tracking documents for each fetcher
+        # Initialize tracking documents for each fetcher
         db.system.insert_many(
             [
                 {"_id": "blocks", "last_height": 0},

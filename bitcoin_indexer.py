@@ -185,13 +185,27 @@ class Indexer:
                 collection, data = await db_queue.get()
 
                 if collection == "blocks":
+                    # 1) Insert the block document
                     db.blocks.insert_one(data)
-                    update_last_processed("blocks", {"last_height": data["height"]})
                     logger.info(
                         f"🟢 New Block Indexed: Height {data['height']} | Hash {data['hash']}"
                     )
 
+                    # 2) For each transaction in the block, store it in the `transactions`
+                    #    collection with block references
+                    for tx in data["tx"]:
+                        tx["block_hash"] = data["hash"]
+                        tx["block_height"] = data["height"]
+                        # upsert means if the TX already exists (e.g. from mempool),
+                        # we update it to reflect confirmation
+                        db.transactions.update_one(
+                            {"txid": tx["txid"]}, {"$set": tx}, upsert=True
+                        )
+
+                    update_last_processed("blocks", {"last_height": data["height"]})
+
                 elif collection == "transactions":
+                    # Insert mempool transactions as before
                     db.transactions.insert_one(data)
                     update_last_processed("transactions", {"last_txid": data["txid"]})
                     logger.info(f"🔵 New Transaction Indexed: TXID {data['txid']}")
@@ -202,6 +216,7 @@ class Indexer:
                     update_last_processed("peers", {"last_updated": datetime.utcnow()})
                     logger.info(f"🟣 Peers Updated: {len(data)} connected peers")
 
+                # Acknowledge the task is done
                 db_queue.task_done()
 
             except Exception as e:

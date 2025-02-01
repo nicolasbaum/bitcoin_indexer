@@ -38,6 +38,10 @@ mongo-start:
 mongo-stop:
 	chmod +x stop_mongo_repset.sh
 	./stop_mongo_repset.sh
+
+mongo-clean:
+	chmod +x clean_mongo_repset.sh
+	./clean_mongo_repset.sh
 	
 poetry_shell:
 	poetry shell
