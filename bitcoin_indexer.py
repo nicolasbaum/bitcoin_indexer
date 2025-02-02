@@ -1,12 +1,13 @@
 import asyncio
 import json
 import os
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Union
 
 import aiohttp
 import pymongo
 from loguru import logger
+from pymongo.errors import DuplicateKeyError
 
 from db_initializer import setup_collections
 
@@ -100,6 +101,7 @@ class BlockFetcher:
                 if block_hash is None:
                     continue
 
+                # getblock with verbosity=2 => includes full tx data
                 block_data = await self.rpc.call("getblock", [block_hash, 2])
                 if block_data:
                     await block_queue.put(block_data)
@@ -126,9 +128,10 @@ class MempoolFetcher:
             }
             last_txid = last_stored["last_txid"]
 
+            # You can limit to e.g. 50 TXIDs
             for txid in mempool_txids[:50]:
                 if txid == last_txid:
-                    break  # Stop if we reach the last stored transaction
+                    break
 
                 tx_data = await self.rpc.call("getrawtransaction", [txid, True])
                 if tx_data:
@@ -149,7 +152,9 @@ class PeerFetcher:
             peers = await self.rpc.call("getpeerinfo")
             if peers:
                 await peer_queue.put(peers)
-                update_last_processed("peers", {"last_updated": datetime.utcnow()})
+                update_last_processed(
+                    "peers", {"last_updated": datetime.now(timezone.utc)}
+                )
 
             await asyncio.sleep(30)
 
@@ -176,8 +181,80 @@ class MessageListener:
                 logger.error(f"MessageListener error: {e}")
 
 
+# --------------------------------------------------------------------
+# Recursive removal of any "_id" fields to avoid immutable _id errors
+# --------------------------------------------------------------------
+def remove_id_recursively(obj: Union[dict, list]):
+    """Recursively delete '_id' key from any nested dict/list structure."""
+    if isinstance(obj, dict):
+        # Remove _id if present
+        obj.pop("_id", None)
+        # Recurse into values
+        for val in obj.values():
+            remove_id_recursively(val)
+    elif isinstance(obj, list):
+        for item in obj:
+            remove_id_recursively(item)
+
+
+def enrich_transaction(
+    tx: dict,
+    block_time: int = None,
+    block_hash: str = None,
+    block_height: int = None,
+) -> dict:
+    """
+    Enrich a transaction with addresses, fees, input totals, etc.
+    Looks up the previous TX outputs to identify input addresses + amounts.
+    """
+    if block_hash is not None:
+        tx["block_hash"] = block_hash
+    if block_height is not None:
+        tx["block_height"] = block_height
+    if block_time is not None:
+        tx["block_time"] = block_time  # Unix timestamp
+
+    all_addresses = set()
+    input_total = 0.0
+
+    # Parse vin for addresses
+    if "vin" in tx:
+        for vin_item in tx["vin"]:
+            vin_item.setdefault("addresses", [])
+            prev_txid = vin_item.get("txid")
+            if prev_txid:
+                prev_index = vin_item.get("vout", -1)
+                prev_tx_doc = db.transactions.find_one({"txid": prev_txid})
+                if prev_tx_doc and "vout" in prev_tx_doc:
+                    try:
+                        spent_out = prev_tx_doc["vout"][prev_index]
+                        addrs = spent_out.get("scriptPubKey", {}).get("addresses", [])
+                        vin_item["addresses"] = addrs
+                        input_total += spent_out.get("value", 0.0)
+                        for a in addrs:
+                            all_addresses.add(a)
+                    except (IndexError, KeyError):
+                        pass
+
+    output_total = 0.0
+    if "vout" in tx:
+        for vout_item in tx["vout"]:
+            val = vout_item.get("value", 0.0)
+            output_total += val
+            addrs = vout_item.get("scriptPubKey", {}).get("addresses", [])
+            for a in addrs:
+                all_addresses.add(a)
+
+    tx["input_total"] = input_total
+    tx["output_total"] = output_total
+    tx["fee"] = round(input_total - output_total, 8)
+    tx["all_addresses"] = list(all_addresses)
+
+    return tx
+
+
 class Indexer:
-    """Handles writing data to MongoDB from the DB queue with logging."""
+    """Handles writing data to MongoDB from the DB queue with logging"""
 
     async def run(self):
         while True:
@@ -185,38 +262,65 @@ class Indexer:
                 collection, data = await db_queue.get()
 
                 if collection == "blocks":
-                    # 1) Insert the block document
-                    db.blocks.insert_one(data)
+                    # Remove any _id fields in the block doc
+                    remove_id_recursively(data)
+
+                    # Insert or replace block doc
+                    try:
+                        db.blocks.insert_one(data)
+                    except DuplicateKeyError:
+                        db.blocks.replace_one({"hash": data["hash"]}, data)
+
                     logger.info(
                         f"🟢 New Block Indexed: Height {data['height']} | Hash {data['hash']}"
                     )
 
-                    # 2) For each transaction in the block, store it in the `transactions`
-                    #    collection with block references
+                    # For each TX in the block, do the same
+                    block_time = data.get("time")
+                    block_hash = data["hash"]
+                    block_height = data["height"]
+
                     for tx in data["tx"]:
-                        tx["block_hash"] = data["hash"]
-                        tx["block_height"] = data["height"]
-                        # upsert means if the TX already exists (e.g. from mempool),
-                        # we update it to reflect confirmation
+                        enriched_tx = enrich_transaction(
+                            tx,
+                            block_time=block_time,
+                            block_hash=block_hash,
+                            block_height=block_height,
+                        )
+                        # Remove all _id from sub-docs
+                        remove_id_recursively(enriched_tx)
+
                         db.transactions.update_one(
-                            {"txid": tx["txid"]}, {"$set": tx}, upsert=True
+                            {"txid": enriched_tx["txid"]},
+                            {"$set": enriched_tx},
+                            upsert=True,
                         )
 
                     update_last_processed("blocks", {"last_height": data["height"]})
 
                 elif collection == "transactions":
-                    # Insert mempool transactions as before
-                    db.transactions.insert_one(data)
+                    # Mempool TX
+                    enriched_tx = enrich_transaction(data)
+                    remove_id_recursively(enriched_tx)
+
+                    # Try inserting; if there's a duplicate key, replace existing
+                    try:
+                        db.transactions.insert_one(enriched_tx)
+                    except DuplicateKeyError:
+                        db.transactions.replace_one(
+                            {"txid": enriched_tx["txid"]}, enriched_tx
+                        )
+
                     update_last_processed("transactions", {"last_txid": data["txid"]})
                     logger.info(f"🔵 New Transaction Indexed: TXID {data['txid']}")
 
                 elif collection == "peers":
+                    # For peers, we can simply remove & re-insert
                     db.peers.delete_many({})
                     db.peers.insert_many(data)
                     update_last_processed("peers", {"last_updated": datetime.utcnow()})
                     logger.info(f"🟣 Peers Updated: {len(data)} connected peers")
 
-                # Acknowledge the task is done
                 db_queue.task_done()
 
             except Exception as e:

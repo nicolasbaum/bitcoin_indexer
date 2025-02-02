@@ -1,151 +1,125 @@
-# 🚀 Bitcoin Indexer
+# Bitcoin Blockchain Indexer 🌐
 
-A **high-performance Bitcoin Indexer** that fetches **blocks, transactions, and peers** from a Bitcoin node using **RPC**, stores the data in **MongoDB**, and resumes indexing from the last stored document.
+A high-performance Bitcoin blockchain indexer that stores structured blockchain data in MongoDB. Features async processing, automatic retries, data enrichment, and real-time monitoring of blocks, mempool transactions, and network peers.
 
-## **✨ Features**
-- ✅ **Resumable fetching** → Uses a `system` collection to track the last indexed block, tx, and peer data.
-- ✅ **Asynchronous indexing** → Built with `asyncio` for high performance.
-- ✅ **Auto-retry on errors** → Uses **exponential backoff** for RPC calls.
-- ✅ **Efficient storage** → Saves **blocks, transactions, and peers** in MongoDB.
-- ✅ **Pre-commit hooks** → Ensures clean and consistent code using `black`, `isort`, and `flake8`.
-- ✅ **Environment variables support** → Stores sensitive config values in a `.env` file.
+## Features
 
----
+- **Block Indexing**: Full block data with transaction details
+- **Mempool Monitoring**: Real-time unconfirmed transaction tracking
+- **Peer Network Analysis**: Connected node statistics and geo-data
+- **Data Enrichment**:
+  - Transaction fee calculation
+  - Address aggregation
+  - Input/output value tracking
+- **Resilient Architecture**:
+  - Async RPC calls with exponential backoff
+  - Queue-based processing
+  - MongoDB duplicate handling
 
-## **📦 Installation**
-### **1️⃣ Clone the Repository**
+## Prerequisites
+
+- Python 3.12+
+- MongoDB 6.0+
+- Poetry dependency manager
+- Bitcoin Core node with RPC access
+
+## Installation
+
 ```bash
-git clone https://github.com/nicolasbaum/bitcoin_indexer.git
-cd bitcoin_indexer
-```
-
-### **2️⃣ Install Dependencies**
-```bash
+git clone https://github.com/yourusername/bitcoin-indexer.git
+cd bitcoin-indexer
 poetry install
 ```
 
-### **3️⃣ Setup Pre-commit Hooks**
-```bash
-make pre-commit-install
-```
+## Configuration
 
----
-
-## **⚙️ Configuration**
-### **1️⃣ Create a `.env` file**
-```bash
-cp .env.example .env
-```
-Then, edit `.env` to match your setup:
+Create *.env* file:
 ```ini
-RPC_USER=__cookie__
-RPC_PASSWORD=your_rpc_password
-RPC_URL=http://umbrel.local:8332
+RPC_USER=your_bitcoin_rpc_user
+RPC_PASSWORD=your_bitcoin_rpc_password
+RPC_URL=http://your.node:8332
+#ONLY for RPC nodes on different machines:
 MONGO_URL=mongodb://localhost:27017/
 ```
 
-### **2️⃣ Set Up MongoDB Replica Set**
-To enable replica set support for MongoDB, run:
+## MongoDB Setup
+
+Start MongoDB replica set:
 ```bash
 make mongo-start
 ```
 
-To stop MongoDB:
+Initialize collections:
 ```bash
-make mongo-stop
+poetry run python db_initializer.py
 ```
 
----
+## Running the Indexer
 
-## **🚀 Usage**
-### **1️⃣ Run the Indexer**
+Start the main indexer:
 ```bash
 make run-indexer
 ```
-or manually:
+
+Control MongoDB:
 ```bash
-poetry run python bitcoin_indexer.py
+make mongo-start   # Start MongoDB
+make mongo-stop    # Stop MongoDB
+make mongo-clean   # Reset database
 ```
 
-### **2️⃣ Running Inside a Virtual Shell**
-To avoid prefixing commands with `poetry run`, enter the shell:
-```bash
-make poetry_shell
-```
-Now you can run:
-```bash
-python bitcoin_indexer.py
-```
+## Project Structure
 
----
+| File/Folder         | Description                              |
+|-------------------|-----------------------------------------------------------|
+| `bitcoin_indexer.py`	| Main indexer logic and async processors      |
+| `db_initializer.py` 	| MongoDB collection setup and index creation  |
+| `mongo_repset/` 		| MongoDB replica set data storage             |
+| `*.sh`				| MongoDB management scripts                  |
+| `Makefile` 			| Development workflow shortcuts              |
 
-## **🛠️ MongoDB Schema**
-### **📌 Collections:**
-- `blocks` → Stores **Bitcoin blocks**.
-- `transactions` → Stores **transactions** with full details.
-- `mempool` → Stores **unconfirmed transactions**.
-- `peers` → Stores **connected peers**.
-- `system` → Tracks the **last processed block, tx, and peers**.
+## Data Models
 
-### **📌 Example Query**
-To check the latest indexed block:
+### Blocks Collection
 ```javascript
-db.system.findOne({"_id": "blocks"})
+{
+  "hash": "000000000000034a7...",
+  "height": 812345,
+  "tx": [...],
+  "time": 1689341205,
+  "difficulty": 48127.35
+}
 ```
 
----
-
-## **🐛 Troubleshooting**
-### **Issue: "Cannot Connect to MongoDB"**
-- Ensure MongoDB is running:  
-  ```bash
-  systemctl status mongod
-  ```
-- Verify **MongoDB URL** in `.env`:
-  ```ini
-  MONGO_URL=mongodb://localhost:27017/
-  ```
-
-### **Issue: "RPC Authentication Failed"**
-- Check **Bitcoin Core `bitcoin.conf`**:
-  ```ini
-  rpcuser=__cookie__
-  rpcpassword=your_rpc_password
-  ```
-- Restart Bitcoin node.
-
-### **Issue: "pre-commit hook failed"**
-- Run:
-  ```bash
-  make fix-imports
-  ```
-
----
-
-## **🛠️ Development & Contribution**
-### **Code Style**
-This project follows:
-- **PEP-8** (via `flake8`)
-- **Black** for formatting
-- **isort** for import sorting
-
-To check before committing:
-```bash
-make check-imports
+### Transactions Collection
+```javascript
+{
+  "txid": "a1075db55d416d3c...",
+  "block_height": 812345,
+  "input_total": 1.5432,
+  "output_total": 1.5428,
+  "fee": 0.0004,
+  "all_addresses": ["1A10zP1eP5QGefi2..."]
+}
 ```
 
-To auto-fix:
+## Development
+
+Format code:
 ```bash
 make fix-imports
 ```
 
----
+Run checks:
+```bash
+make pre-commit-run
+```
 
-## **📜 License**
-MIT License - Feel free to use and modify!
-
----
+Enter virtual environment:
+```bash
+poetry shell
+```
 
 ## **👨‍💻 Author**
-Created by **[Nicolas Baum](https://github.com/nicolasbaum)**  
+Created by **[Nicolas Baum](https://github.com/nicolasbaum)** (nicolasbaum@gmail.com)
 For contributions, feel free to submit a **PR** or open an **issue**! 🚀

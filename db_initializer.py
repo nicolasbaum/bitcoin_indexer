@@ -30,13 +30,19 @@ def setup_collections():
         db.create_collection("transactions")
         logger.info("✅ Created 'transactions' collection.")
     db.transactions.create_index([("txid", ASCENDING)], unique=True)
-    db.transactions.create_index([("vin.txid", ASCENDING)])  # Index inputs
-    db.transactions.create_index(
-        [("vout.scriptPubKey.addresses", ASCENDING)]
-    )  # Index addresses
-    # For block
+
+    # Index on input references
+    db.transactions.create_index([("vin.txid", ASCENDING)])
+
+    # Index on output addresses
+    db.transactions.create_index([("vout.scriptPubKey.addresses", ASCENDING)])
+
+    # Block references
     db.transactions.create_index([("block_hash", ASCENDING)])
     db.transactions.create_index([("block_height", ASCENDING)])
+
+    # Optional index on aggregated addresses
+    db.transactions.create_index([("all_addresses", ASCENDING)])
 
     # 🟢 Mempool Collection
     if "mempool" not in db.list_collection_names():
