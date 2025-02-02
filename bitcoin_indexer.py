@@ -1,15 +1,18 @@
 import asyncio
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Union
+from typing import Any, Optional
 
 import aiohttp
 import pymongo
+from dotenv import load_dotenv
 from loguru import logger
-from pymongo.errors import DuplicateKeyError
 
 from db_initializer import setup_collections
+
+load_dotenv()
 
 # Load environment variables
 RPC_USER = os.getenv("RPC_USER", "__cookie__")
@@ -27,9 +30,9 @@ mempool_queue = asyncio.Queue()
 peer_queue = asyncio.Queue()
 db_queue = asyncio.Queue()
 
-# Set up logging
-if not logger._core.handlers:
-    logger.add("logs/bitcoin_indexer.log", rotation="10MB", level="INFO")
+# Ensure logs directory exists
+os.makedirs("logs", exist_ok=True)
+logger.add("logs/bitcoin_indexer.log", rotation="10MB", level="INFO")
 logger.info("🚀 Bitcoin Indexer Started!")
 
 
@@ -37,6 +40,61 @@ def update_last_processed(key: str, value: dict):
     """Updates the last processed document in the system collection."""
     db.system.update_one({"_id": key}, {"$set": value}, upsert=True)
     logger.info(f"✅ Updated system tracker: {key} -> {value}")
+
+
+# --- Helper functions for address derivation ---
+def hash160(data: bytes) -> bytes:
+    """Perform SHA256 followed by RIPEMD160 on the data."""
+    sha = hashlib.sha256(data).digest()
+    ripemd = hashlib.new("ripemd160", sha).digest()
+    return ripemd
+
+
+def base58_check_encode(payload: bytes) -> str:
+    """Encode payload using Base58Check encoding."""
+    checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    full_payload = payload + checksum
+    num = int.from_bytes(full_payload, "big")
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    encoded = ""
+    while num > 0:
+        num, mod = divmod(num, 58)
+        encoded = alphabet[mod] + encoded
+    # Add '1' for each leading 0 byte in payload.
+    n_leading = len(full_payload) - len(full_payload.lstrip(b"\x00"))
+    return "1" * n_leading + encoded
+
+
+def derive_address_from_pubkey(script_hex: str) -> Optional[str]:
+    """
+    Derives a P2PKH address from a P2PK script hex.
+    Expects the script to be in the format:
+      - Uncompressed: "41{65-byte pubkey}ac"
+      - (If it were compressed, the length byte would be 21 instead.)
+    Returns the Base58Check encoded address (using version byte 0x00) or None on error.
+    """
+    try:
+        script_bytes = bytes.fromhex(script_hex)
+        # Check that the script ends with OP_CHECKSIG (0xac)
+        if script_bytes[-1] != 0xAC:
+            return None
+        # For P2PK, the script starts with a length byte.
+        # Uncompressed public keys start with 0x41 followed by 65 bytes.
+        if script_bytes[0] != 0x41 or len(script_bytes) != 67:
+            return None
+        # Extract the 65-byte public key (skip the first byte and the last byte)
+        pubkey = script_bytes[1:-1]
+        # Compute hash160 of the public key.
+        h160 = hash160(pubkey)
+        # Prepend the mainnet version byte (0x00) for P2PKH.
+        payload = b"\x00" + h160
+        return base58_check_encode(payload)
+    except Exception as e:
+        logger.error(f"Error deriving address from pubkey: {e}")
+        return None
+
+
+# --- End helper functions ---
 
 
 class BitcoinRPC:
@@ -70,11 +128,9 @@ class BitcoinRPC:
                         else:
                             logger.error(f"RPC error {resp.status} on method {method}")
                             raise Exception(f"RPC error {resp.status}")
-
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(f"RPC call {method} failed (attempt {attempt + 1}): {e}")
-                await asyncio.sleep(2**attempt)  # Exponential backoff
-
+                await asyncio.sleep(2**attempt)
         logger.error(f"Max retries reached for RPC method {method}")
         return None
 
@@ -100,18 +156,16 @@ class BlockFetcher:
                 block_hash = await self.rpc.call("getblockhash", [height])
                 if block_hash is None:
                     continue
-
-                # getblock with verbosity=2 => includes full tx data
+                # Get block with verbosity=2 to include full transaction data.
                 block_data = await self.rpc.call("getblock", [block_hash, 2])
                 if block_data:
                     await block_queue.put(block_data)
                     update_last_processed("blocks", {"last_height": height})
-
             await asyncio.sleep(10)
 
 
 class MempoolFetcher:
-    """Fetches mempool transactions and sends them to queue."""
+    """Fetches mempool transactions and sends them to the queue."""
 
     def __init__(self, rpc: BitcoinRPC):
         self.rpc = rpc
@@ -128,21 +182,18 @@ class MempoolFetcher:
             }
             last_txid = last_stored["last_txid"]
 
-            # You can limit to e.g. 50 TXIDs
             for txid in mempool_txids[:50]:
                 if txid == last_txid:
                     break
-
                 tx_data = await self.rpc.call("getrawtransaction", [txid, True])
                 if tx_data:
                     await mempool_queue.put(tx_data)
                     update_last_processed("transactions", {"last_txid": txid})
-
             await asyncio.sleep(5)
 
 
 class PeerFetcher:
-    """Fetches peer data and sends it to queue."""
+    """Fetches peer data and sends it to the queue."""
 
     def __init__(self, rpc: BitcoinRPC):
         self.rpc = rpc
@@ -155,7 +206,6 @@ class PeerFetcher:
                 update_last_processed(
                     "peers", {"last_updated": datetime.now(timezone.utc)}
                 )
-
             await asyncio.sleep(30)
 
 
@@ -181,43 +231,32 @@ class MessageListener:
                 logger.error(f"MessageListener error: {e}")
 
 
-# --------------------------------------------------------------------
-# Recursive removal of any "_id" fields to avoid immutable _id errors
-# --------------------------------------------------------------------
-def remove_id_recursively(obj: Union[dict, list]):
-    """Recursively delete '_id' key from any nested dict/list structure."""
-    if isinstance(obj, dict):
-        # Remove _id if present
-        obj.pop("_id", None)
-        # Recurse into values
-        for val in obj.values():
-            remove_id_recursively(val)
-    elif isinstance(obj, list):
-        for item in obj:
-            remove_id_recursively(item)
-
-
-def enrich_transaction(
+async def enrich_transaction(
     tx: dict,
     block_time: int = None,
     block_hash: str = None,
     block_height: int = None,
+    rpc: BitcoinRPC = None,
 ) -> dict:
     """
-    Enrich a transaction with addresses, fees, input totals, etc.
-    Looks up the previous TX outputs to identify input addresses + amounts.
+    Enrich a transaction with addresses, fees, and input/output totals.
+    For each output (vout):
+      - If the "addresses" field is missing or empty and a script hex is available:
+         - If the script type is "pubkey", derive the P2PKH address manually.
+         - Otherwise, attempt a 'decodescript' RPC call.
+    Also, block information is added.
     """
     if block_hash is not None:
         tx["block_hash"] = block_hash
     if block_height is not None:
         tx["block_height"] = block_height
     if block_time is not None:
-        tx["block_time"] = block_time  # Unix timestamp
+        tx["block_time"] = block_time
 
     all_addresses = set()
     input_total = 0.0
 
-    # Parse vin for addresses
+    # Enrich inputs (vin) by looking up previous transactions.
     if "vin" in tx:
         for vin_item in tx["vin"]:
             vin_item.setdefault("addresses", [])
@@ -229,6 +268,17 @@ def enrich_transaction(
                     try:
                         spent_out = prev_tx_doc["vout"][prev_index]
                         addrs = spent_out.get("scriptPubKey", {}).get("addresses", [])
+                        spk = spent_out.get("scriptPubKey", {})
+                        # If addresses missing and it's a P2PK output, derive address.
+                        if (
+                            (not addrs or len(addrs) == 0)
+                            and spk.get("type") == "pubkey"
+                            and "hex" in spk
+                        ):
+                            derived = derive_address_from_pubkey(spk["hex"])
+                            if derived:
+                                addrs = [derived]
+                                spk["addresses"] = addrs
                         vin_item["addresses"] = addrs
                         input_total += spent_out.get("value", 0.0)
                         for a in addrs:
@@ -241,7 +291,21 @@ def enrich_transaction(
         for vout_item in tx["vout"]:
             val = vout_item.get("value", 0.0)
             output_total += val
-            addrs = vout_item.get("scriptPubKey", {}).get("addresses", [])
+            spk = vout_item.get("scriptPubKey", {})
+            addrs = spk.get("addresses", [])
+            # If addresses missing and a script hex is available, try deriving.
+            if (not addrs or len(addrs) == 0) and "hex" in spk and rpc is not None:
+                # For P2PK outputs, derive the address manually.
+                if spk.get("type") == "pubkey":
+                    derived = derive_address_from_pubkey(spk["hex"])
+                    if derived:
+                        addrs = [derived]
+                        spk["addresses"] = addrs
+                else:
+                    decoded = await rpc.call("decodescript", [spk["hex"]])
+                    if decoded and decoded.get("addresses"):
+                        addrs = decoded["addresses"]
+                        spk["addresses"] = addrs
             for a in addrs:
                 all_addresses.add(a)
 
@@ -249,12 +313,14 @@ def enrich_transaction(
     tx["output_total"] = output_total
     tx["fee"] = round(input_total - output_total, 8)
     tx["all_addresses"] = list(all_addresses)
-
     return tx
 
 
 class Indexer:
-    """Handles writing data to MongoDB from the DB queue with logging"""
+    """Handles writing data to MongoDB from the DB queue with logging."""
+
+    def __init__(self, rpc: BitcoinRPC):
+        self.rpc = rpc
 
     async def run(self):
         while True:
@@ -262,34 +328,27 @@ class Indexer:
                 collection, data = await db_queue.get()
 
                 if collection == "blocks":
-                    # Remove any _id fields in the block doc
-                    remove_id_recursively(data)
-
-                    # Insert or replace block doc
-                    try:
-                        db.blocks.insert_one(data)
-                    except DuplicateKeyError:
-                        db.blocks.replace_one({"hash": data["hash"]}, data)
-
+                    # Update or insert the block document using $set
+                    db.blocks.update_one(
+                        {"hash": data["hash"]}, {"$set": data}, upsert=True
+                    )
                     logger.info(
                         f"🟢 New Block Indexed: Height {data['height']} | Hash {data['hash']}"
                     )
 
-                    # For each TX in the block, do the same
                     block_time = data.get("time")
                     block_hash = data["hash"]
                     block_height = data["height"]
 
+                    # Enrich each transaction asynchronously (including address extraction)
                     for tx in data["tx"]:
-                        enriched_tx = enrich_transaction(
+                        enriched_tx = await enrich_transaction(
                             tx,
                             block_time=block_time,
                             block_hash=block_hash,
                             block_height=block_height,
+                            rpc=self.rpc,
                         )
-                        # Remove all _id from sub-docs
-                        remove_id_recursively(enriched_tx)
-
                         db.transactions.update_one(
                             {"txid": enriched_tx["txid"]},
                             {"$set": enriched_tx},
@@ -299,26 +358,23 @@ class Indexer:
                     update_last_processed("blocks", {"last_height": data["height"]})
 
                 elif collection == "transactions":
-                    # Mempool TX
-                    enriched_tx = enrich_transaction(data)
-                    remove_id_recursively(enriched_tx)
-
-                    # Try inserting; if there's a duplicate key, replace existing
-                    try:
-                        db.transactions.insert_one(enriched_tx)
-                    except DuplicateKeyError:
-                        db.transactions.replace_one(
-                            {"txid": enriched_tx["txid"]}, enriched_tx
-                        )
-
+                    # Process mempool transaction using update with $set
+                    enriched_tx = await enrich_transaction(data, rpc=self.rpc)
+                    db.transactions.update_one(
+                        {"txid": enriched_tx["txid"]},
+                        {"$set": enriched_tx},
+                        upsert=True,
+                    )
                     update_last_processed("transactions", {"last_txid": data["txid"]})
                     logger.info(f"🔵 New Transaction Indexed: TXID {data['txid']}")
 
                 elif collection == "peers":
-                    # For peers, we can simply remove & re-insert
+                    # For peers, remove all documents and insert new ones
                     db.peers.delete_many({})
                     db.peers.insert_many(data)
-                    update_last_processed("peers", {"last_updated": datetime.utcnow()})
+                    update_last_processed(
+                        "peers", {"last_updated": datetime.now(timezone.utc)}
+                    )
                     logger.info(f"🟣 Peers Updated: {len(data)} connected peers")
 
                 db_queue.task_done()
@@ -335,7 +391,7 @@ async def main():
     mempool_fetcher = MempoolFetcher(rpc)
     peer_fetcher = PeerFetcher(rpc)
     message_listener = MessageListener()
-    indexer = Indexer()
+    indexer = Indexer(rpc)
 
     await asyncio.gather(
         block_fetcher.run(),
