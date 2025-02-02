@@ -335,8 +335,8 @@ class Indexer:
                         {"hash": data["hash"]}, {"$set": data}, upsert=True
                     )
                     logger.info(
-                        f"🟢 New Block Indexed: Height {data['height']} | ",
-                        "Ts {datetime.fromtimestamp(data['time'])}",
+                        f"🟢 Block: Height {data['height']} | "
+                        f"{datetime.fromtimestamp(data['time'])}",
                     )
 
                     block_time = data.get("time")
