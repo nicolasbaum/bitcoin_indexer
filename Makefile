@@ -7,8 +7,10 @@ export PATH := $(BIN):$(PATH)
 # Load environment variables
 export $(shell set -o allexport && source .env && set +o allexport)
 
-.PHONY: all
-all: run-indexer
+.PHONY: restart-indexer
+
+restart-indexer:
+	poetry run python auto_restart_indexer.py
 
 run-indexer:
 	poetry run python bitcoin_indexer.py

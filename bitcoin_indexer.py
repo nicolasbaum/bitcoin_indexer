@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -30,8 +31,9 @@ mempool_queue = asyncio.Queue()
 peer_queue = asyncio.Queue()
 db_queue = asyncio.Queue()
 
-# Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
+logger.remove()
+logger.add(sys.stdout, level="INFO")
 logger.add("logs/bitcoin_indexer.log", rotation="10MB", level="INFO")
 logger.info("🚀 Bitcoin Indexer Started!")
 
@@ -39,7 +41,7 @@ logger.info("🚀 Bitcoin Indexer Started!")
 def update_last_processed(key: str, value: dict):
     """Updates the last processed document in the system collection."""
     db.system.update_one({"_id": key}, {"$set": value}, upsert=True)
-    logger.info(f"✅ Updated system tracker: {key} -> {value}")
+    logger.debug(f"✅ Updated system tracker: {key} -> {value}")
 
 
 # --- Helper functions for address derivation ---
@@ -333,7 +335,8 @@ class Indexer:
                         {"hash": data["hash"]}, {"$set": data}, upsert=True
                     )
                     logger.info(
-                        f"🟢 New Block Indexed: Height {data['height']} | Hash {data['hash']}"
+                        f"🟢 New Block Indexed: Height {data['height']} | ",
+                        "Ts {datetime.fromtimestamp(data['time'])}",
                     )
 
                     block_time = data.get("time")
@@ -366,7 +369,7 @@ class Indexer:
                         upsert=True,
                     )
                     update_last_processed("transactions", {"last_txid": data["txid"]})
-                    logger.info(f"🔵 New Transaction Indexed: TXID {data['txid']}")
+                    logger.debug(f"🔵 New Transaction Indexed: TXID {data['txid']}")
 
                 elif collection == "peers":
                     # For peers, remove all documents and insert new ones
@@ -375,7 +378,7 @@ class Indexer:
                     update_last_processed(
                         "peers", {"last_updated": datetime.now(timezone.utc)}
                     )
-                    logger.info(f"🟣 Peers Updated: {len(data)} connected peers")
+                    logger.debug(f"🟣 Peers Updated: {len(data)} connected peers")
 
                 db_queue.task_done()
 
