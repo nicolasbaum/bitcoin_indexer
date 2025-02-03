@@ -3,7 +3,9 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, Optional
 
 import aiohttp
@@ -33,8 +35,8 @@ db_queue = asyncio.Queue()
 
 os.makedirs("logs", exist_ok=True)
 logger.remove()
-logger.add(sys.stdout, level="INFO")
-logger.add("logs/bitcoin_indexer.log", rotation="10MB", level="INFO")
+logger.add(sys.stdout, format="{time} {level} {message}", level="INFO")
+logger.add("logs/bitcoin_indexer.json", serialize=True, level="DEBUG")
 logger.info("🚀 Bitcoin Indexer Started!")
 
 
@@ -146,24 +148,33 @@ class BlockFetcher:
     async def run(self):
         """Continuously fetch new blocks and send to queue."""
         while True:
-            latest_block_height = await self.rpc.call("getblockcount")
-            if latest_block_height is None:
-                await asyncio.sleep(10)
-                continue
-
-            last_stored = db.system.find_one({"_id": "blocks"}) or {"last_height": 0}
-            start_height = last_stored["last_height"] + 1
-
-            for height in range(start_height, latest_block_height + 1):
-                block_hash = await self.rpc.call("getblockhash", [height])
-                if block_hash is None:
+            try:
+                latest_block_height = await self.rpc.call("getblockcount")
+                if latest_block_height is None:
+                    await asyncio.sleep(10)
                     continue
-                # Get block with verbosity=2 to include full transaction data.
-                block_data = await self.rpc.call("getblock", [block_hash, 2])
-                if block_data:
-                    await block_queue.put(block_data)
-                    update_last_processed("blocks", {"last_height": height})
-            await asyncio.sleep(10)
+
+                last_stored = db.system.find_one({"_id": "blocks"}) or {
+                    "last_height": 0
+                }
+                start_height = last_stored["last_height"] + 1
+
+                for height in range(start_height, latest_block_height + 1):
+                    block_hash = await self.rpc.call("getblockhash", [height])
+                    if block_hash is None:
+                        continue
+                    # Get block with verbosity=2 to include full transaction data.
+                    block_data = await self.rpc.call("getblock", [block_hash, 2])
+                    if block_data:
+                        await block_queue.put(block_data)
+                        update_last_processed("blocks", {"last_height": height})
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                logger.info("BlockFetcher cancelled.")
+                raise  # Important to re-raise so that cancellation can proceed
+            except Exception as e:
+                logger.exception(f"BlockFetcher error: {e}")
+                await asyncio.sleep(5)
 
 
 class MempoolFetcher:
@@ -174,24 +185,31 @@ class MempoolFetcher:
 
     async def run(self):
         while True:
-            mempool_txids = await self.rpc.call("getrawmempool")
-            if mempool_txids is None:
+            try:
+                mempool_txids = await self.rpc.call("getrawmempool")
+                if mempool_txids is None:
+                    await asyncio.sleep(5)
+                    continue
+
+                last_stored = db.system.find_one({"_id": "transactions"}) or {
+                    "last_txid": None
+                }
+                last_txid = last_stored["last_txid"]
+
+                for txid in mempool_txids[:50]:
+                    if txid == last_txid:
+                        break
+                    tx_data = await self.rpc.call("getrawtransaction", [txid, True])
+                    if tx_data:
+                        await mempool_queue.put(tx_data)
+                        update_last_processed("transactions", {"last_txid": txid})
                 await asyncio.sleep(5)
-                continue
-
-            last_stored = db.system.find_one({"_id": "transactions"}) or {
-                "last_txid": None
-            }
-            last_txid = last_stored["last_txid"]
-
-            for txid in mempool_txids[:50]:
-                if txid == last_txid:
-                    break
-                tx_data = await self.rpc.call("getrawtransaction", [txid, True])
-                if tx_data:
-                    await mempool_queue.put(tx_data)
-                    update_last_processed("transactions", {"last_txid": txid})
-            await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                logger.info("MempoolFetcher cancelled.")
+                raise  # Important to re-raise so that cancellation can proceed
+            except Exception as e:
+                logger.exception(f"MempoolFetcher error: {e}")
+                await asyncio.sleep(5)
 
 
 class PeerFetcher:
@@ -202,13 +220,20 @@ class PeerFetcher:
 
     async def run(self):
         while True:
-            peers = await self.rpc.call("getpeerinfo")
-            if peers:
-                await peer_queue.put(peers)
-                update_last_processed(
-                    "peers", {"last_updated": datetime.now(timezone.utc)}
-                )
-            await asyncio.sleep(30)
+            try:
+                peers = await self.rpc.call("getpeerinfo")
+                if peers:
+                    await peer_queue.put(peers)
+                    update_last_processed(
+                        "peers", {"last_updated": datetime.now(timezone.utc)}
+                    )
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                logger.info("PeerFetcher cancelled.")
+                raise  # Important to re-raise so that cancellation can proceed
+            except Exception as e:
+                logger.exception(f"PeerFetcher error: {e}")
+                await asyncio.sleep(5)
 
 
 class MessageListener:
@@ -229,8 +254,16 @@ class MessageListener:
                     await db_queue.put(("peers", peers))
 
                 await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                logger.info("MessageListener cancelled.")
+                raise  # Important to re-raise so that cancellation can proceed
             except Exception as e:
                 logger.error(f"MessageListener error: {e}")
+
+
+@lru_cache(maxsize=10000)
+def get_previous_transaction(txid):
+    return db.transactions.find_one({"txid": txid})
 
 
 async def enrich_transaction(
@@ -265,7 +298,7 @@ async def enrich_transaction(
             prev_txid = vin_item.get("txid")
             if prev_txid:
                 prev_index = vin_item.get("vout", -1)
-                prev_tx_doc = db.transactions.find_one({"txid": prev_txid})
+                prev_tx_doc = get_previous_transaction(prev_txid)
                 if prev_tx_doc and "vout" in prev_tx_doc:
                     try:
                         spent_out = prev_tx_doc["vout"][prev_index]
@@ -282,6 +315,7 @@ async def enrich_transaction(
                                 addrs = [derived]
                                 spk["addresses"] = addrs
                         vin_item["addresses"] = addrs
+                        vin_item["value"] = spent_out.get("value", 0.0)
                         input_total += spent_out.get("value", 0.0)
                         for a in addrs:
                             all_addresses.add(a)
@@ -327,6 +361,7 @@ class Indexer:
     async def run(self):
         while True:
             try:
+                start_time = time.time_ns()
                 collection, data = await db_queue.get()
 
                 if collection == "blocks":
@@ -334,9 +369,10 @@ class Indexer:
                     db.blocks.update_one(
                         {"hash": data["hash"]}, {"$set": data}, upsert=True
                     )
+                    duration = (time.time_ns() - start_time) / 1e6
                     logger.info(
-                        f"🟢 Block: Height {data['height']} | "
-                        f"{datetime.fromtimestamp(data['time'])}",
+                        f"🟢 Indexed block {data['height']} | "
+                        f"{datetime.fromtimestamp(data['time'])} in {duration:.2f}ms"
                     )
 
                     block_time = data.get("time")
@@ -358,6 +394,42 @@ class Indexer:
                             upsert=True,
                         )
 
+                        # Update balances for outputs
+                        for vout in enriched_tx.get("vout", []):
+                            value = vout.get("value", 0.0)
+                            addresses = vout.get("scriptPubKey", {}).get(
+                                "addresses", []
+                            )
+                            for address in addresses:
+                                db.balances.update_one(
+                                    {"address": address},
+                                    {
+                                        "$inc": {"balance": value},
+                                        "$set": {
+                                            "lastModified": datetime.now(timezone.utc),
+                                            "block_height": block_height,
+                                        },
+                                    },
+                                    upsert=True,
+                                )
+
+                        # Update balances for inputs
+                        for vin in enriched_tx.get("vin", []):
+                            value = vin.get("value", 0.0)
+                            addresses = vin.get("addresses", [])
+                            for address in addresses:
+                                db.balances.update_one(
+                                    {"address": address},
+                                    {
+                                        "$inc": {"balance": -value},
+                                        "$set": {
+                                            "lastModified": datetime.now(timezone.utc),
+                                            "block_height": block_height,
+                                        },
+                                    },
+                                    upsert=True,
+                                )
+
                     update_last_processed("blocks", {"last_height": data["height"]})
 
                 elif collection == "transactions":
@@ -369,7 +441,10 @@ class Indexer:
                         upsert=True,
                     )
                     update_last_processed("transactions", {"last_txid": data["txid"]})
-                    logger.debug(f"🔵 New Transaction Indexed: TXID {data['txid']}")
+                    duration = (time.time_ns() - start_time) / 1e6
+                    logger.debug(
+                        f"🔵 New Transaction Indexed: TXID {data['txid']} in {duration:.2f}ms"
+                    )
 
                 elif collection == "peers":
                     # For peers, remove all documents and insert new ones
@@ -378,10 +453,15 @@ class Indexer:
                     update_last_processed(
                         "peers", {"last_updated": datetime.now(timezone.utc)}
                     )
-                    logger.debug(f"🟣 Peers Updated: {len(data)} connected peers")
+                    duration = (time.time_ns() - start_time) / 1e6
+                    logger.debug(
+                        f"🟣 Peers Updated: {len(data)} connected peers in {duration:.2f}ms"
+                    )
 
                 db_queue.task_done()
-
+            except asyncio.CancelledError:
+                logger.info("Indexer cancelled.")
+                raise  # Important to re-raise so that cancellation can proceed
             except Exception as e:
                 logger.error(f"❌ Indexer Error: {e}")
 
@@ -406,4 +486,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Shutting down Bitcoin Indexer...")
+    except Exception as e:
+        logger.error(f"❌ Unhandled exception in main: {e}")

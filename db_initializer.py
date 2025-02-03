@@ -1,4 +1,5 @@
 import os
+import time
 
 from loguru import logger
 from pymongo import ASCENDING, MongoClient
@@ -70,8 +71,27 @@ def setup_collections():
             ]
         )
 
+    # 🟢 Balances Collection (Real time balances)
+    if "balances" not in db.list_collection_names():
+        db.create_collection("balances")
+        db.balances.create_index([("address", ASCENDING)], unique=True)
+
     logger.info("🎉 MongoDB initialization complete!")
 
 
+def wait_for_mongo():
+    retries = 5
+    for attempt in range(retries):
+        try:
+            client.server_info()  # Ping MongoDB
+            logger.info("✅ MongoDB is ready.")
+            return
+        except Exception:
+            logger.warning(f"🚧 MongoDB not ready. Retrying ({attempt+1}/{retries})...")
+            time.sleep(5)
+    raise Exception("❌ MongoDB failed to start.")
+
+
 if __name__ == "__main__":
+    wait_for_mongo()
     setup_collections()
