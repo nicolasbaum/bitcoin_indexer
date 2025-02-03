@@ -33,10 +33,17 @@ mempool_queue = asyncio.Queue()
 peer_queue = asyncio.Queue()
 db_queue = asyncio.Queue()
 
+
 os.makedirs("logs", exist_ok=True)
 logger.remove()
 logger.add(sys.stdout, format="{time} {level} {message}", level="INFO")
-logger.add("logs/bitcoin_indexer.json", serialize=True, level="DEBUG")
+logger.add(
+    "logs/bitcoin_indexer.json",
+    serialize=True,
+    level="DEBUG",
+    rotation="1 day",
+    retention="7 days",
+)
 logger.info("🚀 Bitcoin Indexer Started!")
 
 
@@ -151,7 +158,7 @@ class BlockFetcher:
             try:
                 latest_block_height = await self.rpc.call("getblockcount")
                 if latest_block_height is None:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(0.1)
                     continue
 
                 last_stored = db.system.find_one({"_id": "blocks"}) or {
@@ -188,7 +195,7 @@ class MempoolFetcher:
             try:
                 mempool_txids = await self.rpc.call("getrawmempool")
                 if mempool_txids is None:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(0.1)
                     continue
 
                 last_stored = db.system.find_one({"_id": "transactions"}) or {
@@ -203,7 +210,7 @@ class MempoolFetcher:
                     if tx_data:
                         await mempool_queue.put(tx_data)
                         update_last_processed("transactions", {"last_txid": txid})
-                await asyncio.sleep(5)
+                await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 logger.info("MempoolFetcher cancelled.")
                 raise  # Important to re-raise so that cancellation can proceed
@@ -227,7 +234,7 @@ class PeerFetcher:
                     update_last_processed(
                         "peers", {"last_updated": datetime.now(timezone.utc)}
                     )
-                await asyncio.sleep(30)
+                await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 logger.info("PeerFetcher cancelled.")
                 raise  # Important to re-raise so that cancellation can proceed
@@ -291,6 +298,8 @@ async def enrich_transaction(
     all_addresses = set()
     input_total = 0.0
 
+    start_time = time.time_ns()
+
     # Enrich inputs (vin) by looking up previous transactions.
     if "vin" in tx:
         for vin_item in tx["vin"]:
@@ -349,6 +358,9 @@ async def enrich_transaction(
     tx["output_total"] = output_total
     tx["fee"] = round(input_total - output_total, 8)
     tx["all_addresses"] = list(all_addresses)
+
+    duration = (time.time_ns() - start_time) / 1e6
+    logger.debug(f"🥸 Enriched transaction in {duration:.2f}ms")
     return tx
 
 
@@ -406,7 +418,7 @@ class Indexer:
                                     {
                                         "$inc": {"balance": value},
                                         "$set": {
-                                            "lastModified": datetime.now(timezone.utc),
+                                            "block_time": block_time,
                                             "block_height": block_height,
                                         },
                                     },
@@ -423,7 +435,7 @@ class Indexer:
                                     {
                                         "$inc": {"balance": -value},
                                         "$set": {
-                                            "lastModified": datetime.now(timezone.utc),
+                                            "block_time": block_time,
                                             "block_height": block_height,
                                         },
                                     },
