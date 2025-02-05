@@ -13,7 +13,7 @@ restart-indexer:
 	poetry run python auto_restart_indexer.py
 
 run-indexer:
-	poetry run python bitcoin_indexer.py
+	poetry run python main.py
 
 # Targets
 install:
