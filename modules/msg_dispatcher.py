@@ -23,6 +23,7 @@ class MessageDispatcher:
         self.db_queue = db_queue
 
     async def run(self):
+        logger.info("MessageDispatcher started...")
         while True:
             try:
                 elements = dict()
@@ -34,7 +35,7 @@ class MessageDispatcher:
                 for queue_name, element in elements.items():
                     if element:
                         await self.db_queue.put(Message(queue_name, element))
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.1)
                 # for queue_name, queue in self.msg_queues.items():
                 # logger.info(f"{queue_name} msgs: {queue.qsize()}")
             except asyncio.CancelledError:

@@ -21,6 +21,7 @@ class BlockFetcher:
         self.queue = queue
 
     async def run(self):
+        logger.info("BlockFetcher started...")
         while True:
             try:
                 latest_block_height = await self.rpc.call("getblockcount")

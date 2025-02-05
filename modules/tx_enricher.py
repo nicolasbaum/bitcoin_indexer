@@ -1,7 +1,7 @@
 import time
 from typing import Any, Mapping, Optional
 
-from aiocache import Cache, cached
+from aiocache import cached
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -11,7 +11,9 @@ from modules.utils import derive_address_from_pubkey
 
 class TxEnricher:
     def __init__(
-        self, rpc: BitcoinRPC, db_client: AsyncIOMotorDatabase[Mapping[str, Any]]
+        self,
+        rpc: BitcoinRPC,
+        db_client: AsyncIOMotorDatabase[Mapping[str, Any]],
     ):
         self.rpc = rpc
         self.db_client = db_client
@@ -25,11 +27,11 @@ class TxEnricher:
         txid = args[0] if args else kwargs.get("txid")
         return f"previous_transaction:{txid}"
 
-    @cached(ttl=3600, cache=Cache.MEMORY, key_builder=previous_tx_key_builder)
+    @cached(ttl=3600, key_builder=previous_tx_key_builder)
     async def get_previous_transaction(self, txid: str) -> Optional[dict]:
         """
         Asynchronously retrieves a previous transaction document by txid.
-        The result is cached in-memory for 1 hour.
+        The result is cached in Redis for 1 hour.
         """
         return await self.db_client.transactions.find_one({"txid": txid})
 

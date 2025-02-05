@@ -21,6 +21,7 @@ class MempoolFetcher:
         self.queue = queue
 
     async def run(self):
+        logger.info("MempoolFetcher started...")
         while True:
             try:
                 mempool_txids = await self.rpc.call("getrawmempool")

@@ -1,0 +1,38 @@
+services:
+  bitcoin-indexer:
+    build: .
+    ports:
+      - "8332:8332"  # Bitcoin RPC port
+    environment:
+      - RPC_USER=${RPC_USER}
+      - RPC_PASSWORD=${RPC_PASSWORD}
+      - RPC_URL=${RPC_URL}
+      - MONGO_URI=mongodb://mongodb:27017/
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - mongodb
+      - redis
+    extra_hosts:
+      - "umbrel.local:192.168.0.193"
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:6.0
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27050:27017" # Expose the MongoDB port outside the container at 27050
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  redis_data:

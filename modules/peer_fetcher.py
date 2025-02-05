@@ -21,6 +21,7 @@ class PeerFetcher:
         self.queue = queue
 
     async def run(self):
+        logger.info("PeerFetcher started...")
         while True:
             try:
                 peers = await self.rpc.call("getpeerinfo")

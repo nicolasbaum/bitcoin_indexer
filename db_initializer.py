@@ -9,7 +9,7 @@ from pymongo import ASCENDING  # You can still import index helpers from pymongo
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 
 # MongoDB Connection using Motor
-client = AsyncIOMotorClient(MONGO_URI)
+client = AsyncIOMotorClient(MONGO_URI, maxPoolSize=200)
 db = client["bitcoin_db"]
 
 

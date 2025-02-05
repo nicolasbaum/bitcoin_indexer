@@ -22,10 +22,10 @@ class BitcoinRPC:
             {"jsonrpc": "1.0", "id": method, "method": method, "params": params}
         )
 
-        for attempt in range(self.max_retries):
-            start_time = time.time_ns()
-            try:
-                async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(self.max_retries):
+                start_time = time.time_ns()
+                try:
                     async with session.post(
                         self.url,
                         auth=self.auth,
@@ -46,12 +46,12 @@ class BitcoinRPC:
                                 f"(attempt {attempt + 1}) after {elapsed_time_ms:.2f}ms"
                             )
                             raise Exception(f"RPC error {resp.status}")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                elapsed_time_ms = (time.time_ns() - start_time) / 1e6
-                logger.warning(
-                    f"RPC call {method} failed (attempt {attempt + 1}) "
-                    f"after {elapsed_time_ms:.2f}ms: {e}"
-                )
-                await asyncio.sleep(2**attempt)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    elapsed_time_ms = (time.time_ns() - start_time) / 1e6
+                    logger.warning(
+                        f"RPC call {method} failed (attempt {attempt + 1}) "
+                        f"after {elapsed_time_ms:.2f}ms: {e}"
+                    )
+                    await asyncio.sleep(2**attempt)
         logger.error(f"Max retries reached for RPC method {method}")
         return None
