@@ -55,7 +55,7 @@ class TxEnricher:
         key = f"previous_transaction:{txid}"
         return key
 
-    @cached(ttl=3600, key_builder=previous_tx_key_builder, cache_none=True)
+    @cached(ttl=3600, key_builder=previous_tx_key_builder)
     async def get_previous_transaction(self, txid: str) -> Optional[dict]:
         return await self.db_client.transactions.find_one({"txid": txid})
 
