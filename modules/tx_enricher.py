@@ -1,12 +1,39 @@
+import os
 import time
 from typing import Any, Mapping, Optional
 
-from aiocache import cached
+from aiocache import cached, caches
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from modules.bitcoin_rpc import BitcoinRPC
 from modules.utils import derive_address_from_pubkey
+
+USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
+
+if USE_REDIS:
+    caches.set_config(
+        {
+            "default": {
+                "cache": "aiocache.RedisCache",
+                "endpoint": os.getenv("REDIS_HOST", "redis"),  # default service name
+                "port": int(os.getenv("REDIS_PORT", "6379")),
+                "db": int(os.getenv("REDIS_DB", "0")),
+                "ttl": 3600,
+                "serializer": {"class": "aiocache.serializers.JsonSerializer"},
+            }
+        }
+    )
+else:
+    caches.set_config(
+        {
+            "default": {
+                "cache": "aiocache.SimpleMemoryCache",
+                "ttl": 3600,
+                "serializer": {"class": "aiocache.serializers.JsonSerializer"},
+            }
+        }
+    )
 
 
 class TxEnricher:
@@ -17,29 +44,27 @@ class TxEnricher:
     ):
         self.rpc = rpc
         self.db_client = db_client
+        if USE_REDIS:
+            logger.info("Using Redis for caching...")
+        else:
+            logger.info("Using in-memory cache...")
 
     @staticmethod
-    def previous_tx_key_builder(*args, **kwargs):
-        """
-        Custom key builder for get_previous_transaction.
-        Assumes the first argument is the txid.
-        """
-        txid = args[0] if args else kwargs.get("txid")
-        return f"previous_transaction:{txid}"
+    def previous_tx_key_builder(_, *args, **kwargs):
+        txid = args[1] if len(args) > 1 else kwargs.get("txid")
+        key = f"previous_transaction:{txid}"
+        return key
 
-    @cached(ttl=3600, key_builder=previous_tx_key_builder)
+    @cached(ttl=3600, key_builder=previous_tx_key_builder, cache_none=True)
     async def get_previous_transaction(self, txid: str) -> Optional[dict]:
-        """
-        Asynchronously retrieves a previous transaction document by txid.
-        The result is cached in Redis for 1 hour.
-        """
         return await self.db_client.transactions.find_one({"txid": txid})
 
     async def invalidate_previous_transaction_cache(self, txid: str):
         """
         Invalidate the cache entry for a given transaction ID.
         """
-        key = self.previous_tx_key_builder(self.get_previous_transaction, txid)
+        # Note: When invalidating, we need to supply the same arguments as used during caching.
+        key = self.previous_tx_key_builder(self.get_previous_transaction, self, txid)
         await self.get_previous_transaction.cache.delete(key)
         logger.debug(f"Cache invalidated for transaction {txid}")
 

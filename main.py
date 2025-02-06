@@ -2,7 +2,6 @@ import asyncio
 import os
 import sys
 
-from aiocache import caches
 from dotenv import load_dotenv
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -17,29 +16,17 @@ from modules.peer_fetcher import PeerFetcher
 
 load_dotenv()
 
-caches.set_config(
-    {
-        "default": {
-            "cache": "aiocache.RedisCache",
-            "endpoint": "redis",  # The service name from docker-compose
-            "port": 6379,
-            "db": 0,
-            "ttl": 3600,
-            "serializer": {"class": "aiocache.serializers.JsonSerializer"},
-        }
-    }
-)
-
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 os.makedirs("logs", exist_ok=True)
 logger.remove()
-logger.add(sys.stdout, format="{time} {level} {message}", level="INFO")
-# logger.add(
-#     "logs/bitcoin_indexer.json",
-#     serialize=True,
-#     level="DEBUG",
-#     rotation="1 day",
-#     retention="7 days",
-# )
+logger.add(sys.stdout, format="{time} {level} {message}", level=LOG_LEVEL)
+logger.add(
+    "logs/bitcoin_indexer.json",
+    serialize=True,
+    level=LOG_LEVEL,
+    rotation="1 day",
+    retention="7 days",
+)
 logger.info("🚀 Bitcoin Indexer Started!")
 
 

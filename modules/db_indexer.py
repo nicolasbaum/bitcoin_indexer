@@ -1,6 +1,5 @@
 import asyncio
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -32,8 +31,6 @@ class Indexer:
             "transactions": self.process_transaction,
             "peers": self.process_peers,
         }
-
-        self._update_counters = defaultdict(int)
 
     async def run(self):
         logger.info("DB Indexer started...")
@@ -181,9 +178,8 @@ class Indexer:
             _ = await self.db.system.update_one(
                 {"_id": key}, {"$set": value}, upsert=True
             )
-            self._update_counters[key] = (self._update_counters[key] + 1) % 1000
-            if self._update_counters[key] == 0:
-                logger.info(f"✅ Updated system tracker: {key} -> {value}")
+            if key == "blocks" and value["last_height"] % 1000 == 0:
+                logger.info(f"✅ Processed block {value}")
         except Exception as e:
             logger.error(f"Error updating system tracker for {key}: {e}")
             raise
