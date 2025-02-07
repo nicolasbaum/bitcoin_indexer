@@ -29,14 +29,7 @@ class MempoolFetcher:
                     await asyncio.sleep(0.1)
                     continue
 
-                last_stored = await self.db.system.find_one(
-                    {"_id": "transactions"}
-                ) or {"last_txid": None}
-                last_txid = last_stored["last_txid"]
-
-                for txid in mempool_txids[:50]:
-                    if txid == last_txid:
-                        break
+                for txid in mempool_txids[:50]:  # Limit to 50 for now
                     tx_data = await self.rpc.call("getrawtransaction", [txid, True])
                     if tx_data:
                         await self.queue.put(tx_data)

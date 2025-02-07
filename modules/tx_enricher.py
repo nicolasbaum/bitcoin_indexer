@@ -1,3 +1,4 @@
+# File: modules/tx_enricher.py
 import os
 import time
 from typing import Any, Mapping, Optional
@@ -7,7 +8,10 @@ from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from modules.bitcoin_rpc import BitcoinRPC
-from modules.utils import derive_address_from_pubkey
+from modules.utils import (
+    base58_check_encode,
+    derive_address_from_pubkey,
+)
 
 USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
 
@@ -79,7 +83,8 @@ class TxEnricher:
         Enrich a transaction with addresses, fees, and input/output totals.
         For each output (vout):
           - If the "addresses" field is missing or empty and a script hex is available:
-             - If the script type is "pubkey", derive the P2PKH address manually.
+             - If it's a P2PK script, derive the P2PKH address manually.
+             - If it's a P2SH script, derive the P2SH address manually.
              - Otherwise, attempt a 'decodescript' RPC call.
         Also, block information is added.
         """
@@ -102,7 +107,15 @@ class TxEnricher:
                 if prev_txid:
                     prev_index = vin_item.get("vout", -1)
                     prev_tx_doc = await self.get_previous_transaction(prev_txid)
-                    if prev_tx_doc and "vout" in prev_tx_doc:
+                    if (
+                        prev_tx_doc is None
+                    ):  # Bugfix: Handle case where previous tx is not found
+                        logger.warning(
+                            f"Previous transaction {prev_txid} not found in database"
+                            f" for vin enrichment in tx {tx['txid']}"
+                        )
+                        continue  # Skip to next vin_item
+                    if "vout" in prev_tx_doc:
                         try:
                             spent_out = prev_tx_doc["vout"][prev_index]
                             addrs = spent_out.get("scriptPubKey", {}).get(
@@ -123,8 +136,14 @@ class TxEnricher:
                             input_total += spent_out.get("value", 0.0)
                             for a in addrs:
                                 all_addresses.add(a)
-                        except (IndexError, KeyError):
-                            pass
+                        except (
+                            IndexError,
+                            KeyError,
+                        ) as e:  # Bugfix: Improved error logging for vin processing
+                            logger.warning(
+                                f"Error enriching vin for txid={tx['txid']},"
+                                f" prev_txid={prev_txid}, prev_index={prev_index}: {e}"
+                            )
 
         output_total = 0.0
         if "vout" in tx:
@@ -133,21 +152,93 @@ class TxEnricher:
                 output_total += val
                 spk = vout_item.get("scriptPubKey", {})
                 addrs = spk.get("addresses", [])
+
                 if (
-                    (not addrs or len(addrs) == 0)
-                    and "hex" in spk
-                    and self.rpc is not None
-                ):
-                    if spk.get("type") == "pubkey":
-                        derived = derive_address_from_pubkey(spk["hex"])
-                        if derived:
-                            addrs = [derived]
+                    not addrs and "hex" in spk and self.rpc is not None
+                ):  # Check if addresses are missing AND we have script hex
+                    script_hex = spk["hex"]
+                    if (
+                        script_hex.startswith("a9")
+                        and script_hex.endswith("87")
+                        and len(script_hex) == 50
+                    ):  # Basic P2SH check
+                        try:
+                            script_hash_hex = script_hex[2:-2]
+                            script_hash_bytes = bytes.fromhex(script_hash_hex)
+                            p2sh_version_byte = (
+                                b"\x05"  # Mainnet P2SH version byte (HARDCODED MAINNET)
+                            )
+                            payload = p2sh_version_byte + script_hash_bytes
+                            p2sh_address = base58_check_encode(payload)
+                            addrs = [p2sh_address]
                             spk["addresses"] = addrs
-                    else:
-                        decoded = await self.rpc.call("decodescript", [spk["hex"]])
-                        if decoded and decoded.get("addresses"):
-                            addrs = decoded["addresses"]
+                            logger.debug(
+                                f"Successfully derived P2SH address: {p2sh_address} "
+                                f"from script_hex: {script_hex} in txid: {tx['txid']}"
+                            )
+                        except Exception as e_p2sh_derive:
+                            logger.warning(
+                                f"P2SH address derivation failed for script_hex: "
+                                f"{script_hex} in txid: "
+                                f"{tx['txid']}. Falling back to decodescript. "
+                                f"Error: {e_p2sh_derive}"
+                            )
+                            decoded = await self.rpc.call(
+                                "decodescript", [script_hex]
+                            )  # Fallback to decodescript
+                            if decoded and decoded.get(
+                                "address"
+                            ):  # <---- Corrected address check: decoded.get("address")
+                                addrs = [
+                                    decoded["address"]
+                                ]  # <---- Extract legacy address from "address" key
+                                spk["addresses"] = addrs
+                            elif decoded and not decoded.get(
+                                "address"
+                            ):  # Warning if decodescript runs but still no legacy address
+                                logger.warning(
+                                    f"decodescript returned no *legacy* address for script hex: "
+                                    f"{spk['hex']} in txid: {tx['txid']}, "
+                                    f"script: {spk.get('asm')}. "
+                                    f"Full decoded output (DEBUG level log) might have more info."
+                                )
+                                logger.debug(
+                                    f"Decoded output: {decoded}"
+                                )  # Full decoded output for debugging
+                            elif not decoded:
+                                logger.warning(
+                                    f"decodescript call failed for script hex: "
+                                    f"{spk['hex']} in txid: "
+                                    f"{tx['txid']}, script: {spk.get('asm')}"
+                                )
+                        else:
+                            pass  # P2SH derivation successful, addresses already set
+                    else:  # Not P2SH, fallback to decodescript
+                        decoded = await self.rpc.call("decodescript", [script_hex])
+                        if decoded and decoded.get(
+                            "address"
+                        ):  # <---- Corrected address check: decoded.get("address")
+                            addrs = [
+                                decoded["address"]
+                            ]  # <---- Extract legacy address from "address" key
                             spk["addresses"] = addrs
+                        elif decoded and not decoded.get(
+                            "address"
+                        ):  # Warning if decodescript runs but no legacy address
+                            logger.warning(
+                                f"decodescript returned no *legacy* address for script hex: "
+                                f"{spk['hex']} in txid: {tx['txid']}, script: {spk.get('asm')}. "
+                                f"Full decoded output (DEBUG level log) might have more info."
+                            )
+                            logger.debug(
+                                f"Decoded output: {decoded}"
+                            )  # Full decoded output for debugging
+                        elif not decoded:  # Warning for decodescript call failure
+                            logger.warning(
+                                f"decodescript call failed for script hex: "
+                                f"{spk['hex']} in txid: {tx['txid']}, script: {spk.get('asm')}"
+                            )
+
                 for a in addrs:
                     all_addresses.add(a)
 

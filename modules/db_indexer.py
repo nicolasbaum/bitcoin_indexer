@@ -110,6 +110,14 @@ class Indexer:
                 for vin in enriched_tx.get("vin", []):
                     value = vin.get("value", 0.0)
                     addresses = vin.get("addresses", [])
+                    if value == 0.0 and vin.get(
+                        "txid"
+                    ):  # Bugfix: Check for potential missed vin value
+                        logger.warning(
+                            f"Potential missing input value for vin in txid={enriched_tx['txid']}, "
+                            f"prev_txid={vin.get('txid')},"
+                            f" vout_index={vin.get('vout')}. Balance might be incorrect."
+                        )
                     for address in addresses:
                         balance_updates.append(
                             UpdateOne(
